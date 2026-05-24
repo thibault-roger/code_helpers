@@ -1,0 +1,11 @@
+# Arrow Flight (recommended — fastest, native Dremio protocol)
+pyarrow>=14.0
+polars>=0.20
+requests>=2.31
+
+# Optional — SQLAlchemy/ODBC path (requires Dremio ODBC driver installed separately)
+# sqlalchemy>=2.0
+# pyodbc>=5.0
+
+# Optional — faster Polars SQL reads via connectorx
+# connectorx>=0.3

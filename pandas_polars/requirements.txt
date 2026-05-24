@@ -1,0 +1,4 @@
+pandas>=2.0
+polars>=0.20
+pyarrow>=14.0       # Parquet support for both pandas and polars
+openpyxl>=3.1       # Excel read/write

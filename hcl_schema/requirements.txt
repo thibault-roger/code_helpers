@@ -1,0 +1,2 @@
+python-hcl2>=4.0
+polars>=0.20

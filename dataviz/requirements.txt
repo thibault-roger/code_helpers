@@ -1,0 +1,8 @@
+matplotlib>=3.7
+seaborn>=0.13
+plotly>=5.0
+pandas>=2.0
+# Optional: static image export for plotly (write_image)
+# kaleido>=0.2
+# Optional: trendline in plotly express (trendline="ols")
+# statsmodels>=0.14

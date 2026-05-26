@@ -9,43 +9,44 @@ Also provides a helper to generate a CREATE TABLE SQL statement from a parsed
 
 Expected .hcl format
 --------------------
-One or more labeled table blocks in a single file:
+One or more labeled table blocks in a single file.
+Both table and column names are block labels (not inline fields).
+Attribute values may be quoted strings or bare identifiers.
 
     table "orders" {
-      description = "Sales orders fact table"
-      database    = "analytics"
-      schema      = "public"
+      schema  = public          # unquoted identifier — also accepted
+      comment = "Fact table"
 
-      column {
-        name        = "order_id"
-        type        = "INTEGER"
-        nullable    = false
-        primary_key = true
+      column "order_id" {
+        type    = integer
+        null    = false
+        comment = "Unique order identifier"
       }
 
-      column {
-        name      = "amount"
-        type      = "DECIMAL"
+      column "amount" {
+        type      = decimal
         precision = 10
         scale     = 2
-        nullable  = false
+        null      = false
         tags      = ["finance"]
       }
     }
 
     table "customers" {
-      description = "Customer dimension"
-      database    = "analytics"
-      schema      = "public"
+      schema  = public
+      comment = "Customer dimension"
 
-      column { ... }
+      column "customer_id" { ... }
     }
 
-hcl2 parses this as:
-    {"table": [{"orders": [{...body...}]}, {"customers": [{...body...}]}]}
+hcl2 parses labeled blocks as:
+    {"table": [{"orders": [{...body...}]}, ...]}
+    body["column"] → [{"order_id": [{...}]}, {"amount": [{...}]}, ...]
 
-The table name (label) is extracted from the dict key; all other attributes
-inside the block become table_meta fields.
+Field name aliases handled automatically:
+    null    → nullable
+    comment → description  (table and column level)
+    type values are normalised to uppercase (text → TEXT, integer → INTEGER …)
 
 See examples/sales_orders.hcl for a full reference.
 """
@@ -61,15 +62,15 @@ import polars as pl
 
 # ── Supported column fields ──────────────────────────────────────────────────
 
-# These are the fields that can appear inside a `column { ... }` block.
-# Any field not listed here is still preserved under an "extra" column.
+# Fields recognised inside a `column "name" { ... }` block.
+# `null` and `comment` are the canonical HCL names; they are mapped to
+# `nullable` and `description` in the output DataFrame.
 KNOWN_FIELDS = [
-    "name",
     "type",
-    "nullable",
+    "null",         # → nullable
+    "comment",      # → description
     "primary_key",
     "default",
-    "description",
     "length",       # VARCHAR(n)
     "precision",    # DECIMAL(p, s)
     "scale",        # DECIMAL(p, s)
@@ -103,12 +104,16 @@ _SQL_TYPES: dict[str, str] = {
 
 def _strip(value: Any) -> Any:
     """
-    python-hcl2 returns string literals with surrounding quotes preserved,
-    e.g.  name = "foo"  →  '"foo"'  (a Python str that starts and ends with '"').
-    This function strips those extra quotes recursively for strings and lists.
+    python-hcl2 encodes values in two ways that need unwrapping:
+      - Quoted string literals:   name = "foo"   →  '"foo"'   →  'foo'
+      - Bare identifiers:         type = text    →  '${text}' →  'text'
+    This function strips both artifacts recursively for strings and lists.
     """
-    if isinstance(value, str) and value.startswith('"') and value.endswith('"') and len(value) >= 2:
-        return value[1:-1]
+    if isinstance(value, str):
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            return value[1:-1]
+        if value.startswith("${") and value.endswith("}"):
+            return value[2:-1]
     if isinstance(value, list):
         return [_strip(v) for v in value]
     return value
@@ -142,18 +147,45 @@ def _full_type(col: dict) -> str:
 def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
     """
     Build (table_meta, df) from a single table body dict and its label name.
+
+    Column blocks are labeled:  column "col_name" { ... }
+    hcl2 yields: body["column"] = [{"col_name": [{...}]}, ...]
+
+    Field aliases applied:
+        null    (HCL) → nullable   (output)
+        comment (HCL) → description (output)
     """
-    _skip = {"column", "__comments__", "__is_block__"}
+    _skip = {"column", "primary_key", "__comments__", "__is_block__"}
     table_meta = {k: _strip(v) for k, v in body.items() if k not in _skip}
+    # Map comment → description at table level
+    if "comment" in table_meta:
+        table_meta["description"] = table_meta.pop("comment")
     table_meta["name"] = name  # inject the label as the table name
 
+    # Collect primary-key column names from a table-level primary_key block
+    # e.g.  primary_key { columns = [column.order_id] }
+    pk_set: set[str] = set()
+    for pk_entry in body.get("primary_key", []):
+        pk_body = pk_entry[0] if isinstance(pk_entry, list) else pk_entry
+        if isinstance(pk_body, dict):
+            for ref in pk_body.get("columns", []):
+                # refs look like  "${column.col_name}"  after stripping → "column.col_name"
+                ref_str = _strip(ref)
+                if isinstance(ref_str, str) and "." in ref_str:
+                    pk_set.add(ref_str.split(".")[-1])
+
+    # hcl2 parses  column "col_name" { ... }  as:
+    #   [{"col_name": [{...body...}]}, ...]
     raw_columns: list[dict] = body.get("column", [])
     if not raw_columns:
         return table_meta, pl.DataFrame()
 
     rows = []
-    for raw_col in raw_columns:
-        col = _clean(raw_col)
+    for col_entry in raw_columns:
+        col_name, col_body_list = next(iter(col_entry.items()))
+        col_name = _strip(col_name)
+        col_body = col_body_list[0] if isinstance(col_body_list, list) else col_body_list
+        col = _clean(col_body)
 
         # Normalise tags → comma-separated string (or empty string if absent)
         tags = col.get("tags")
@@ -171,14 +203,17 @@ def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
         else:
             default_str = str(raw_default)
 
+        # `null = false` means NOT nullable; default (field absent) → nullable
+        nullable = col.get("null", True)
+
         rows.append({
-            "name":        col.get("name"),
+            "name":        col_name,
             "type":        (col.get("type") or "").upper(),
             "full_type":   _full_type(col),
-            "nullable":    col.get("nullable", True),
-            "primary_key": col.get("primary_key", False),
+            "nullable":    nullable,
+            "primary_key": col_name in pk_set,
             "default":     default_str,
-            "description": col.get("description"),
+            "description": col.get("comment") or col.get("description"),
             "tags":        tags_str or None,
             "length":      col.get("length"),
             "precision":   col.get("precision"),

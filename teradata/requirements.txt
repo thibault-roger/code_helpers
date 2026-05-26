@@ -1,0 +1,13 @@
+# Teradata driver + SQLAlchemy dialect
+teradatasql>=20.0
+teradatasqlalchemy>=20.0
+
+# DataFrame libraries
+pandas>=2.0
+polars>=0.20
+
+# Required by pandas for read_sql / to_sql via SQLAlchemy
+sqlalchemy>=2.0
+
+# Arrow bridge — zero-copy Polars ↔ pandas conversions
+pyarrow>=14.0

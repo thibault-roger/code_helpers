@@ -21,6 +21,7 @@ Polars has no native ADBC driver for Teradata, so reads go through `pl.read_data
 | File | Description |
 |------|-------------|
 | [`client.py`](client.py) | `TeradataClient` — read/write for pandas and Polars, chunked streaming |
+| [`access_control.py`](access_control.py) | User creation, roles, column/row scoping, views, GRANT/REVOKE reference |
 | [`requirements.txt`](requirements.txt) | Dependencies |
 
 ---

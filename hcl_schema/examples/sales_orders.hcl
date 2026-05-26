@@ -1,9 +1,8 @@
 # sales_orders.hcl
-# Table schema definition for the sales_orders fact table.
-# Each `column` block defines one column of the table.
+# Multi-table schema definition.
+# Each labeled `table` block defines one table.
 
-table {
-  name        = "sales_orders"
+table "sales_orders" {
   description = "Sales orders fact table"
   database    = "analytics"
   schema      = "public"
@@ -90,5 +89,45 @@ table {
     nullable    = true
     description = "Free-text notes added by customer service"
     tags        = ["free_text", "unstructured"]
+  }
+}
+
+table "customers" {
+  description = "Customer dimension table"
+  database    = "analytics"
+  schema      = "public"
+  owner       = "data-team"
+
+  column {
+    name        = "customer_id"
+    type        = "INTEGER"
+    nullable    = false
+    primary_key = true
+    description = "Unique customer identifier"
+  }
+
+  column {
+    name        = "full_name"
+    type        = "VARCHAR"
+    length      = 255
+    nullable    = false
+    description = "Customer full name"
+    tags        = ["pii"]
+  }
+
+  column {
+    name        = "email"
+    type        = "VARCHAR"
+    length      = 320
+    nullable    = true
+    description = "Contact email address"
+    tags        = ["pii"]
+  }
+
+  column {
+    name        = "created_at"
+    type        = "TIMESTAMP"
+    nullable    = false
+    description = "Account creation timestamp"
   }
 }

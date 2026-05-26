@@ -1,21 +1,18 @@
 """
 HCL table schema reader.
 
-Parses a .hcl schema file and returns:
-  - table metadata as a plain dict
-  - column catalog as a Polars DataFrame (one row per column)
+Parses a .hcl schema file containing one or more labeled `table` blocks and
+returns a list of (table_meta, columns_df) tuples — one per table.
 
-Also provides a helper to generate a CREATE TABLE SQL statement from the parsed schema.
+Also provides a helper to generate a CREATE TABLE SQL statement from a parsed
+(table_meta, df) pair.
 
 Expected .hcl format
 --------------------
-Two layouts are supported:
+One or more labeled table blocks in a single file:
 
-**Wrapped** (table block — the common case when hcl2 returns a "table" key):
-
-    table {
-      name        = "my_table"
-      description = "..."
+    table "orders" {
+      description = "Sales orders fact table"
       database    = "analytics"
       schema      = "public"
 
@@ -24,7 +21,6 @@ Two layouts are supported:
         type        = "INTEGER"
         nullable    = false
         primary_key = true
-        description = "Unique order identifier"
       }
 
       column {
@@ -37,12 +33,19 @@ Two layouts are supported:
       }
     }
 
-**Flat** (legacy, top-level attributes without a wrapping block):
+    table "customers" {
+      description = "Customer dimension"
+      database    = "analytics"
+      schema      = "public"
 
-    name        = "my_table"
-    description = "..."
+      column { ... }
+    }
 
-    column { ... }
+hcl2 parses this as:
+    {"table": [{"orders": [{...body...}]}, {"customers": [{...body...}]}]}
+
+The table name (label) is extracted from the dict key; all other attributes
+inside the block become table_meta fields.
 
 See examples/sales_orders.hcl for a full reference.
 """
@@ -134,37 +137,17 @@ def _full_type(col: dict) -> str:
         return base
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Internal helpers ─────────────────────────────────────────────────────────
 
-def parse_schema(hcl_path: str | Path) -> tuple[dict, pl.DataFrame]:
+def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
     """
-    Parse a .hcl table schema file.
-
-    Args:
-        hcl_path: Path to the .hcl file.
-
-    Returns:
-        table_meta: Dict of table-level attributes (name, description, database, …).
-        df: Polars DataFrame — one row per column, with these columns:
-              name, type, full_type, nullable, primary_key, default,
-              description, tags, length, precision, scale
+    Build (table_meta, df) from a single table body dict and its label name.
     """
-    with open(hcl_path, "r") as f:
-        raw = hcl2.load(f)
-
-    # Unwrap a `table { ... }` block if present.
-    # hcl2 turns  table { ... }  into  {"table": [{...}]},
-    # so we peel off that outer list and work on the inner dict.
-    if "table" in raw:
-        tables = raw["table"]
-        raw = tables[0] if tables else {}
-
-    # Table-level metadata — everything except column blocks and hcl2 internals
     _skip = {"column", "__comments__", "__is_block__"}
-    table_meta = {k: _strip(v) for k, v in raw.items() if k not in _skip}
+    table_meta = {k: _strip(v) for k, v in body.items() if k not in _skip}
+    table_meta["name"] = name  # inject the label as the table name
 
-    # Column definitions
-    raw_columns: list[dict] = raw.get("column", [])
+    raw_columns: list[dict] = body.get("column", [])
     if not raw_columns:
         return table_meta, pl.DataFrame()
 
@@ -204,6 +187,40 @@ def parse_schema(hcl_path: str | Path) -> tuple[dict, pl.DataFrame]:
 
     df = pl.DataFrame(rows, infer_schema_length=len(rows))
     return table_meta, df
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def parse_schema(hcl_path: str | Path) -> list[tuple[dict, pl.DataFrame]]:
+    """
+    Parse a .hcl file containing one or more labeled `table` blocks.
+
+    Args:
+        hcl_path: Path to the .hcl file.
+
+    Returns:
+        List of (table_meta, df) tuples — one per table block, in file order.
+
+        table_meta keys: name (from the block label), description, database,
+                         schema, and any other top-level attributes.
+        df columns:      name, type, full_type, nullable, primary_key, default,
+                         description, tags, length, precision, scale
+    """
+    with open(hcl_path, "r") as f:
+        raw = hcl2.load(f)
+
+    # hcl2 parses  table "foo" { ... }  as:
+    #   {"table": [{"foo": [{...body...}]}, ...]}
+    # Each element of the list is a single-key dict mapping the label to a
+    # one-element list containing the body dict.
+    results = []
+    for entry in raw.get("table", []):
+        table_name, body_list = next(iter(entry.items()))
+        table_name = _strip(table_name)  # hcl2 keeps quotes on block labels
+        body = body_list[0] if isinstance(body_list, list) else body_list
+        results.append(_parse_table_body(table_name, body))
+
+    return results
 
 
 def _sql_default(value: str) -> str:

@@ -9,27 +9,40 @@ Also provides a helper to generate a CREATE TABLE SQL statement from the parsed 
 
 Expected .hcl format
 --------------------
+Two layouts are supported:
+
+**Wrapped** (table block — the common case when hcl2 returns a "table" key):
+
+    table {
+      name        = "my_table"
+      description = "..."
+      database    = "analytics"
+      schema      = "public"
+
+      column {
+        name        = "order_id"
+        type        = "INTEGER"
+        nullable    = false
+        primary_key = true
+        description = "Unique order identifier"
+      }
+
+      column {
+        name      = "amount"
+        type      = "DECIMAL"
+        precision = 10
+        scale     = 2
+        nullable  = false
+        tags      = ["finance"]
+      }
+    }
+
+**Flat** (legacy, top-level attributes without a wrapping block):
+
     name        = "my_table"
     description = "..."
-    database    = "analytics"
-    schema      = "public"
 
-    column {
-      name        = "order_id"
-      type        = "INTEGER"
-      nullable    = false
-      primary_key = true
-      description = "Unique order identifier"
-    }
-
-    column {
-      name      = "amount"
-      type      = "DECIMAL"
-      precision = 10
-      scale     = 2
-      nullable  = false
-      tags      = ["finance"]
-    }
+    column { ... }
 
 See examples/sales_orders.hcl for a full reference.
 """
@@ -139,8 +152,15 @@ def parse_schema(hcl_path: str | Path) -> tuple[dict, pl.DataFrame]:
     with open(hcl_path, "r") as f:
         raw = hcl2.load(f)
 
+    # Unwrap a `table { ... }` block if present.
+    # hcl2 turns  table { ... }  into  {"table": [{...}]},
+    # so we peel off that outer list and work on the inner dict.
+    if "table" in raw:
+        tables = raw["table"]
+        raw = tables[0] if tables else {}
+
     # Table-level metadata — everything except column blocks and hcl2 internals
-    _skip = {"column", "__comments__"}
+    _skip = {"column", "__comments__", "__is_block__"}
     table_meta = {k: _strip(v) for k, v in raw.items() if k not in _skip}
 
     # Column definitions

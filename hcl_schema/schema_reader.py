@@ -177,8 +177,6 @@ def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
     # hcl2 parses  column "col_name" { ... }  as:
     #   [{"col_name": [{...body...}]}, ...]
     raw_columns: list[dict] = body.get("column", [])
-    if not raw_columns:
-        return table_meta, pl.DataFrame()
 
     rows = []
     for col_entry in raw_columns:
@@ -207,6 +205,7 @@ def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
         nullable = col.get("null", True)
 
         rows.append({
+            "table_name":  name,
             "name":        col_name,
             "type":        (col.get("type") or "").upper(),
             "full_type":   _full_type(col),
@@ -220,42 +219,73 @@ def _parse_table_body(name: str, body: dict) -> tuple[dict, pl.DataFrame]:
             "scale":       col.get("scale"),
         })
 
-    df = pl.DataFrame(rows, infer_schema_length=len(rows))
-    return table_meta, df
+    return table_meta, pl.DataFrame(rows, schema={
+        "table_name": pl.String, "name": pl.String, "type": pl.String,
+        "full_type": pl.String, "nullable": pl.Boolean, "primary_key": pl.Boolean,
+        "default": pl.String, "description": pl.String, "tags": pl.String,
+        "length": pl.Int64, "precision": pl.Int64, "scale": pl.Int64,
+    })
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Internal loader ──────────────────────────────────────────────────────────
 
-def parse_schema(hcl_path: str | Path) -> list[tuple[dict, pl.DataFrame]]:
-    """
-    Parse a .hcl file containing one or more labeled `table` blocks.
-
-    Args:
-        hcl_path: Path to the .hcl file.
-
-    Returns:
-        List of (table_meta, df) tuples — one per table block, in file order.
-
-        table_meta keys: name (from the block label), description, database,
-                         schema, and any other top-level attributes.
-        df columns:      name, type, full_type, nullable, primary_key, default,
-                         description, tags, length, precision, scale
-    """
+def _load_tables(hcl_path: str | Path) -> list[tuple[dict, pl.DataFrame]]:
+    """Parse all table blocks; return list of (table_meta, df) in file order."""
     with open(hcl_path, "r") as f:
         raw = hcl2.load(f)
 
     # hcl2 parses  table "foo" { ... }  as:
     #   {"table": [{"foo": [{...body...}]}, ...]}
-    # Each element of the list is a single-key dict mapping the label to a
-    # one-element list containing the body dict.
     results = []
     for entry in raw.get("table", []):
         table_name, body_list = next(iter(entry.items()))
         table_name = _strip(table_name)  # hcl2 keeps quotes on block labels
         body = body_list[0] if isinstance(body_list, list) else body_list
         results.append(_parse_table_body(table_name, body))
-
     return results
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+_EMPTY_DF = pl.DataFrame(schema={
+    "table_name": pl.String, "name": pl.String, "type": pl.String,
+    "full_type": pl.String, "nullable": pl.Boolean, "primary_key": pl.Boolean,
+    "default": pl.String, "description": pl.String, "tags": pl.String,
+    "length": pl.Int64, "precision": pl.Int64, "scale": pl.Int64,
+})
+
+
+def parse_schema(hcl_path: str | Path) -> pl.DataFrame:
+    """
+    Parse a .hcl file and return all column definitions as a single DataFrame.
+
+    Args:
+        hcl_path: Path to the .hcl file.
+
+    Returns:
+        pl.DataFrame with one row per column across all table blocks.
+
+        Columns: table_name, name, type, full_type, nullable, primary_key,
+                 default, description, tags, length, precision, scale
+    """
+    tables = _load_tables(hcl_path)
+    if not tables:
+        return _EMPTY_DF.clone()
+    return pl.concat([df for _, df in tables])
+
+
+def parse_schema_meta(hcl_path: str | Path) -> list[dict]:
+    """
+    Parse a .hcl file and return table-level metadata only.
+
+    Args:
+        hcl_path: Path to the .hcl file.
+
+    Returns:
+        List of dicts — one per table block, in file order.
+        Keys: name, description, schema, owner, database, …
+    """
+    return [meta for meta, _ in _load_tables(hcl_path)]
 
 
 def _sql_default(value: str) -> str:

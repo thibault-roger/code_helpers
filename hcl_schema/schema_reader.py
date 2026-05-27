@@ -1,25 +1,34 @@
 """
 HCL table schema reader.
 
-Parses a .hcl schema file containing one or more labeled `table` blocks and
-returns a list of (table_meta, columns_df) tuples — one per table.
+Public API
+----------
+parse_schema(path) -> pl.DataFrame
+    Parse all `table` blocks in a .hcl file and return every column definition
+    as a single flat Polars DataFrame (one row per column, all tables).
 
-Also provides a helper to generate a CREATE TABLE SQL statement from a parsed
-(table_meta, df) pair.
+    Columns: table_name, name, type, full_type, nullable, primary_key,
+             default, description, tags, length, precision, scale
+
+parse_schema_meta(path) -> list[dict]
+    Return table-level metadata only (name, schema, comment/description, …).
+    One dict per table block, in file order.
+
+schema_to_sql(table_meta, df) -> str
+    Generate a CREATE TABLE SQL statement from one (meta, filtered-df) pair.
 
 Expected .hcl format
 --------------------
-One or more labeled table blocks in a single file.
-Both table and column names are block labels (not inline fields).
-Attribute values may be quoted strings or bare identifiers.
+One or more labeled `table` blocks per file.  Table and column names are
+block labels; attribute values may be quoted strings or bare identifiers.
 
     table "orders" {
-      schema  = public          # unquoted identifier — also accepted
+      schema  = public              # bare identifier, also accepted
       comment = "Fact table"
 
       column "order_id" {
         type    = integer
-        null    = false
+        null    = false             # false → NOT NULL
         comment = "Unique order identifier"
       }
 
@@ -30,23 +39,32 @@ Attribute values may be quoted strings or bare identifiers.
         null      = false
         tags      = ["finance"]
       }
+
+      primary_key {
+        columns = [column.order_id]
+      }
     }
 
     table "customers" {
       schema  = public
       comment = "Customer dimension"
 
-      column "customer_id" { ... }
+      column "customer_id" {
+        type = integer
+        null = false
+      }
+
+      primary_key {
+        columns = [column.customer_id]
+      }
     }
 
-hcl2 parses labeled blocks as:
-    {"table": [{"orders": [{...body...}]}, ...]}
-    body["column"] → [{"order_id": [{...}]}, {"amount": [{...}]}, ...]
-
-Field name aliases handled automatically:
-    null    → nullable
-    comment → description  (table and column level)
-    type values are normalised to uppercase (text → TEXT, integer → INTEGER …)
+Field aliases applied automatically
+------------------------------------
+    HCL field   →  DataFrame column
+    null        →  nullable   (null = false means NOT NULL)
+    comment     →  description  (table and column level)
+    type values are uppercased  (integer → INTEGER, text → TEXT …)
 
 See examples/sales_orders.hcl for a full reference.
 """

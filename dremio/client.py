@@ -1,18 +1,24 @@
 """
-Dremio client — Arrow Flight (recommended for bulk reads/writes).
+Dremio client — Arrow Flight for reads, SQL for writes.
 
-Optimized for high-volume transfers (>1M rows):
+Arrow Flight is Dremio's native columnar protocol and is excellent for
+high-volume *reads*. Dremio's Flight server does NOT implement do_put, so
+writes go through SQL `INSERT INTO ... VALUES`, batched per statement.
+
 - Parallel endpoint reading across Dremio data fragments
 - Chunk streaming for constant-memory reads
-- Batched writes to avoid memory spikes
 - Streaming sink to Parquet via PyArrow writer
-- Create a table from a Polars/pandas DataFrame schema, then push the data
+- SQL INSERT writes (batched); create a table from a DataFrame schema
+- For bulk ingestion prefer COPY INTO from a registered source, or the
+  Iceberg REST path in `iceberg_client.py` (writes straight to object storage)
 """
 
 from __future__ import annotations
 
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, Generator
 
 import pyarrow as pa
@@ -82,6 +88,30 @@ def _quote_path(destination: str) -> str:
     return ".".join(f'"{part}"' for part in destination.split("/"))
 
 
+def _sql_literal(value: object) -> str:
+    """
+    Render a Python scalar as a Dremio SQL literal for use in INSERT VALUES.
+
+    Note the datetime check precedes date: datetime is a subclass of date.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float, Decimal)):
+        return str(value)
+    if isinstance(value, datetime.datetime):
+        return f"TIMESTAMP '{value.isoformat(sep=' ')}'"
+    if isinstance(value, datetime.date):
+        return f"DATE '{value.isoformat()}'"
+    if isinstance(value, datetime.time):
+        return f"TIME '{value.isoformat()}'"
+    if isinstance(value, (bytes, bytearray)):
+        return "x'" + value.hex() + "'"
+    # Strings (and any fallback): single-quote escaped per SQL.
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 @dataclass
 class DremioConfig:
     host: str
@@ -89,8 +119,8 @@ class DremioConfig:
     username: str = ""
     password: str = ""
     tls: bool = True
-    # Write: rows per Arrow batch sent over the wire
-    batch_size: int = 100_000
+    # Write: rows packed into a single INSERT ... VALUES statement
+    insert_batch_size: int = 1_000
     # Read: parallel threads for multi-endpoint queries
     max_workers: int = 8
 
@@ -206,28 +236,47 @@ class DremioClient:
             reader = self._client.do_get(endpoint.ticket, self._opts)
             reader.read_all()  # drain to force execution; result is empty
 
-    def write(self, df: "DataFrame | pa.Table", destination: str) -> None:
+    def write(
+        self,
+        df: "DataFrame | pa.Table",
+        destination: str,
+        *,
+        insert_batch_size: int | None = None,
+    ) -> None:
         """
-        Write a Polars or pandas DataFrame to an existing Dremio table.
+        Write a Polars or pandas DataFrame to an existing Dremio table via SQL.
 
-        Sends data in batches of `cfg.batch_size` rows to avoid large
-        in-flight memory allocations. The destination table must already
-        exist — use `create_table()` to create it first.
+        Dremio's Arrow Flight server does not support do_put ingestion, so this
+        issues `INSERT INTO ... VALUES` statements, packing `insert_batch_size`
+        rows per statement to bound statement size. The destination table must
+        already exist — use `create_table()` to create it first.
+
+        This is the simplest, most portable write path but not the fastest: each
+        row is serialized to a SQL literal. For bulk loads prefer `COPY INTO`
+        from a registered source, or `iceberg_client.py` (writes Parquet
+        straight to object storage via the Iceberg REST catalog).
 
         Args:
             df: Polars or pandas DataFrame to write.
             destination: Dremio path, e.g. "my_space/output_table".
+            insert_batch_size: Rows per INSERT statement (defaults to config).
         """
         table = _to_arrow(df)
-        path_parts = [p.encode() for p in destination.split("/")]
-        descriptor = flight.FlightDescriptor.for_path(*path_parts)
+        if table.num_rows == 0:
+            return
 
-        writer, _ = self._client.do_put(descriptor, table.schema, self._opts)
-        try:
-            for offset in range(0, table.num_rows, self.cfg.batch_size):
-                writer.write_table(table.slice(offset, self.cfg.batch_size))
-        finally:
-            writer.close()
+        sql_path = _quote_path(destination)
+        column_names = table.column_names
+        columns = ", ".join(f'"{name}"' for name in column_names)
+        rows_per_stmt = insert_batch_size or self.cfg.insert_batch_size
+
+        rows = table.to_pylist()
+        for offset in range(0, len(rows), rows_per_stmt):
+            values = ",\n    ".join(
+                "(" + ", ".join(_sql_literal(row[name]) for name in column_names) + ")"
+                for row in rows[offset : offset + rows_per_stmt]
+            )
+            self.execute(f"INSERT INTO {sql_path} ({columns})\nVALUES\n    {values}")
 
     def create_table(
         self,

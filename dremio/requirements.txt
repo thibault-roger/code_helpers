@@ -1,7 +1,11 @@
-# Arrow Flight (recommended — fastest, native Dremio protocol)
+# Arrow Flight (fastest reads, native Dremio protocol) + SQL writes
 pyarrow>=14.0
 polars>=0.20
 requests>=2.31
+
+# Iceberg REST catalog path (iceberg_client.py) — writes Parquet straight to
+# object storage via Dremio's catalog with vended credentials
+pyiceberg[pyarrow]>=0.7
 
 # Optional — SQLAlchemy/ODBC path (requires Dremio ODBC driver installed separately)
 # sqlalchemy>=2.0

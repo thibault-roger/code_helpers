@@ -4,17 +4,19 @@
 
 | Method | Speed | Setup | Write support | Use when |
 |--------|-------|-------|---------------|----------|
-| **Arrow Flight** | Fast | Medium (port 32010) | Yes | Default — bulk reads/writes |
+| **Iceberg REST** | Fast | Medium (catalog + vending) | Direct to storage | Bulk ingestion into Iceberg tables |
+| **Arrow Flight** | Fast reads | Medium (port 32010) | SQL `INSERT` only | Default for reads; small SQL writes |
 | **REST API** | Slower | Low (just HTTP) | Via SQL only | Quick scripts, no driver |
 | SQLAlchemy/ODBC | Medium | High (ODBC driver) | Yes | Legacy integrations |
 
-Arrow Flight is the native Dremio protocol. It transfers data in columnar format (Apache Arrow) with minimal overhead — the right default for any non-trivial volume.
+Arrow Flight is the native Dremio protocol for **reads** — columnar Apache Arrow with minimal overhead. Note Dremio's Flight server does **not** support `do_put`, so Flight-based writes are not possible; `client.py` writes via SQL `INSERT`. For bulk ingestion, the Iceberg REST path writes Parquet straight to object storage and bypasses the SQL engine entirely.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| [`client.py`](client.py) | Production `DremioClient` — Arrow Flight, parallel reads, batched writes, streaming |
+| [`client.py`](client.py) | `DremioClient` — Arrow Flight parallel reads + streaming; SQL `INSERT` writes |
+| [`iceberg_client.py`](iceberg_client.py) | `DremioIcebergClient` — PyIceberg via the Dremio REST catalog, vended-credential writes straight to object storage |
 | [`rest_client.py`](rest_client.py) | Lightweight REST API client — no driver required |
 | [`requirements.txt`](requirements.txt) | Dependencies |
 
@@ -33,7 +35,7 @@ df = client.read('SELECT col_a, col_b FROM "space"."table" WHERE dt >= \'2025-01
 for chunk in client.stream('SELECT * FROM "space"."huge_table"'):
     process(chunk)
 
-# Write — batched, into an existing table
+# Write — SQL INSERT, into an existing table
 client.write(df, "my_space/output_table")
 
 # Create a table from a DataFrame (Polars or pandas) and push the data
@@ -42,6 +44,54 @@ client.create_table(df, "my_source/staging/orders", replace=True)
 # Stream directly to Parquet — never loads full dataset in RAM
 client.stream_to_parquet('SELECT * FROM "space"."huge_table"', "/tmp/output.parquet")
 ```
+
+## Iceberg REST path (bulk ingestion, vended credentials)
+
+`iceberg_client.py` uses PyIceberg against Dremio's Iceberg REST catalog. Writes
+go **straight to object storage** as Parquet (no SQL engine, no rows serialized
+to literals); the catalog vends short-lived storage credentials, so your
+**personal access token is the only secret you supply**.
+
+```python
+from dremio.iceberg_client import DremioIcebergClient, DremioCatalogConfig
+
+cfg = DremioCatalogConfig(
+    uri="https://dremio.company.com/api/iceberg",  # REST catalog endpoint
+    token="<personal-access-token>",
+    warehouse="my_project",                        # Dremio catalog / project
+    vended_credentials=True,
+)
+ice = DremioIcebergClient(cfg)
+
+# Read — column pruning + predicate pushdown
+df = ice.read("staging.orders", columns=["id", "amount"], row_filter="dt >= '2025-01-01'")
+
+# Write — append / overwrite, columnar straight to storage
+ice.write(df, "staging.orders", mode="append")
+ice.write(df, "staging.orders", mode="overwrite")
+
+# Upsert — update matched rows, insert the rest
+ice.upsert(df, "staging.orders", join_cols=["id"])
+
+# Create a catalog-managed Iceberg table from a DataFrame, then load it
+ice.create_table(df, "staging.orders", replace=True)
+```
+
+Requires Dremio's integrated Iceberg REST catalog with credential vending, and
+the target must be a catalog-managed Iceberg table.
+
+### Benchmarking the two write paths
+
+Both clients expose the same `write(df, target)` shape, so you can A/B them:
+
+| Path | Call | Mechanism |
+|------|------|-----------|
+| SQL INSERT | `DremioClient.write(df, "src/tbl")` | `INSERT … VALUES`, batched per `insert_batch_size` |
+| Iceberg REST | `DremioIcebergClient.write(df, "ns.tbl")` | Parquet written directly to object storage |
+
+Expect the Iceberg path to pull ahead as row count and width grow — the SQL path
+serializes every value to a literal and round-trips statements through the
+engine, while PyIceberg writes columnar files in bulk.
 
 ## Creating a table from a DataFrame
 

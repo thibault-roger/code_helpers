@@ -1,0 +1,3 @@
+# Local PostgreSQL data directories (created by local_server.py)
+.pgdata/
+.pgdata-fakeprod/

@@ -1,0 +1,15 @@
+# Real PostgreSQL 16 binaries in a pip wheel (local development only — not needed in prod)
+pgserver>=0.1.4
+
+# Driver + connection layer (same in local and prod)
+psycopg[binary]>=3.1
+sqlalchemy>=2.0
+
+# DataFrame libraries
+polars>=1.0
+pandas>=2.0
+pyarrow>=14.0
+numpy>=1.24
+
+# Atlas is a standalone CLI, not a pip package:
+#   brew install ariga/tap/atlas     or     curl -sSf https://atlasgo.sh | sh

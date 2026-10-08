@@ -9,6 +9,7 @@ Practical, production-ready Python snippets organized by topic.
 | [dremio/](dremio/) | Read and write data from Dremio — Arrow Flight, REST API, high-volume patterns |
 | [pandas_polars/](pandas_polars/) | Data manipulation reference for analysts — selecting, filtering, groupby, joins, strings, dates, I/O |
 | [teradata/](teradata/) | Read and write data from Teradata — pandas & Polars, chunked streaming, authentication options |
+| [postgresql_local_prod/](postgresql_local_prod/) | Real PostgreSQL locally without Docker (pgserver), Atlas migrations, same code from laptop to production |
 | [hcl_schema/](hcl_schema/) | Parse `.hcl` table schema files into a Polars DataFrame + generate CREATE TABLE SQL |
 | [dataviz/](dataviz/) | Data visualization with Matplotlib, Seaborn, and Plotly — static and interactive charts |
 | [env_helpers/](env_helpers/) | Poetry reference — commands, dependency groups, `pyproject.toml` template, Makefile |
